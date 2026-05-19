@@ -17,8 +17,8 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, filters
 
 
 ROOT = Path(__file__).resolve().parent
@@ -32,9 +32,12 @@ TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
 ASK_DETAILS = 0
 
 logging.basicConfig(
-    filename=ROOT / "bot_errors.log",
-    level=logging.ERROR,
+    level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(ROOT / "bot_errors.log"),
+        logging.StreamHandler()
+    ]
 )
 
 
@@ -464,6 +467,10 @@ def shift_work_seconds(conn: sqlite3.Connection, shift: sqlite3.Row, until: date
         br_start = parse_dt(br["start_at"])
         br_end = parse_dt(br["end_at"]) if br["end_at"] else until or now_local()
         total -= max(0, int((br_end - br_start).total_seconds()))
+    
+    # Zaokraglamy czas pracy do najblizszych 15 minut (900 sekund) tylko dla zakonczonych zmian
+    if shift["end_at"] is not None:
+        total = int(round(total / 900) * 900)
     return max(0, total)
 
 
@@ -527,9 +534,9 @@ def day_bounds(day: date) -> tuple[str, str]:
     return iso(start), iso(end)
 
 
-async def send(update: Update, text: str) -> None:
+async def send(update: Update, text: str, reply_markup: InlineKeyboardMarkup | None = None) -> None:
     if update.effective_message:
-        await update.effective_message.reply_text(text)
+        await update.effective_message.reply_text(text, reply_markup=reply_markup, parse_mode="Markdown")
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -869,14 +876,29 @@ async def quick_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     user_id = update.effective_user.id
     current = now_local()
     text = " ".join(context.args)
-    try:
-        if not text:
-            await send(
-                update,
-                "Przyklady:\n/dodaj 8-16\n/dodaj wczoraj 8 16\n/dodaj 11.05 8:00-16:00 przerwa 12-12:30",
-            )
-            return
+    if not text:
+        keyboard = [
+            [
+                InlineKeyboardButton("📅 Dziś 8:00 - 16:00", callback_data="add:dzis:8-16"),
+                InlineKeyboardButton("📅 Wczoraj 8:00 - 16:00", callback_data="add:wczoraj:8-16"),
+            ],
+            [
+                InlineKeyboardButton("📅 Dziś 9:00 - 17:00", callback_data="add:dzis:9-17"),
+                InlineKeyboardButton("📅 Wczoraj 9:00 - 17:00", callback_data="add:wczoraj:9-17"),
+            ],
+            [
+                InlineKeyboardButton("✍️ Ręcznie (wpisz np. /dodaj wczoraj 8-16)", callback_data="add:custom")
+            ]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        await send(
+            update,
+            "*Szybkie dodawanie zmiany:*\nWybierz jedną z opcji poniżej lub wpisz ręcznie np. `/dodaj wczoraj 8-16`:",
+            reply_markup=reply_markup,
+        )
+        return
 
+    try:
         day, start_clock, end_clock, breaks = parse_shift_text(text, current)
         with db() as conn:
             close_stale_breaks(conn, user_id, current)
@@ -954,15 +976,22 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         close_stale_breaks(conn, user_id, current)
         if not args:
             shifts = conn.execute(
-                "SELECT * FROM shifts WHERE user_id = ? ORDER BY start_at DESC LIMIT 10",
+                "SELECT * FROM shifts WHERE user_id = ? ORDER BY start_at DESC LIMIT 5",
                 (user_id,),
             ).fetchall()
             if not shifts:
-                await send(update, "Nie ma jeszcze zadnych wpisow do usuniecia.")
+                await send(update, "Nie masz jeszcze żadnych wpisów do usunięcia.")
                 return
-            lines = ["Ostatnie wpisy. Usuniesz tak: /usun NUMER albo /usun ostatni", ""]
-            lines.extend(format_shift_line(conn, shift) for shift in shifts)
-            await send(update, "\n".join(lines))
+            
+            keyboard = []
+            lines = ["*Wybierz zmianę, którą chcesz usunąć (kliknij przycisk poniżej):*", ""]
+            for shift in shifts:
+                number = shift_number(conn, shift)
+                lines.append(format_shift_line(conn, shift))
+                keyboard.append([InlineKeyboardButton(f"❌ Usuń #{number}", callback_data=f"del:{shift['id']}:{number}")])
+            
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await send(update, "\n".join(lines), reply_markup=reply_markup)
             return
 
         try:
@@ -974,16 +1003,16 @@ async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             else:
                 shift = get_shift_by_number(conn, user_id, int(args[0]))
         except ValueError:
-            await send(update, "Podaj numer wpisu, np. /usun 3, albo /usun ostatni.")
+            await send(update, "Podaj numer wpisu, np. `/usun 3` lub `/usun ostatni`.")
             return
 
         if not shift:
-            await send(update, "Nie znalazlem takiego wpisu.")
+            await send(update, "Nie znalazłem takiego wpisu.")
             return
 
         deleted = format_shift_line(conn, shift)
         conn.execute("DELETE FROM shifts WHERE id = ? AND user_id = ?", (shift["id"], user_id))
-        await send(update, f"Usunieto wpis:\n{deleted}")
+        await send(update, f"Usunięto wpis:\n{deleted}")
 
 
 async def list_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1174,6 +1203,41 @@ def start_health_check_server():
     logging.info(f"Health check server started on port {port}")
 
 
+async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    await query.answer()
+    user_id = update.effective_user.id
+    current = now_local()
+    data = query.data
+
+    if data.startswith("del:"):
+        _, shift_id_str, number = data.split(":")
+        shift_id = int(shift_id_str)
+        with db() as conn:
+            shift = get_shift(conn, user_id, shift_id)
+            if not shift:
+                await query.edit_message_text("Nie znaleziono lub zmiana została już usunięta.")
+                return
+            deleted_line = format_shift_line(conn, shift)
+            conn.execute("DELETE FROM shifts WHERE id = ? AND user_id = ?", (shift_id, user_id))
+            await query.edit_message_text(f"✅ Pomyślnie usunięto zmianę #{number}!\n\n{deleted_line}")
+
+    elif data.startswith("add:"):
+        _, day_token, time_range = data.split(":")
+        if day_token == "custom":
+            await query.edit_message_text("Wpisz komendę ręcznie, np:\n`/dodaj wczoraj 8:30-16:45` lub `/dodaj dzis 8-16`.")
+            return
+        text = f"{day_token} {time_range}"
+        try:
+            day, start_clock, end_clock, breaks = parse_shift_text(text, current)
+            with db() as conn:
+                close_stale_breaks(conn, user_id, current)
+                shift = insert_manual_shift(conn, user_id, day, start_clock, end_clock, breaks, current)
+                await query.edit_message_text(f"✅ Pomyślnie dodano zmianę!\n\n{format_shift_line(conn, shift)}")
+        except ValueError as exc:
+            await query.edit_message_text(f"Błąd podczas szybkiego dodawania: {exc}")
+
+
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "wklej_tutaj_token_od_BotFather":
         raise SystemExit("Brak TELEGRAM_BOT_TOKEN w pliku .env.")
@@ -1191,6 +1255,7 @@ def main() -> None:
         fallbacks=[CommandHandler("anuluj", cancel_fill)],
     )
     app.add_handler(fill_handler)
+    app.add_handler(CallbackQueryHandler(callback_query_handler))
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("przerwa", break_cmd))
     app.add_handler(CommandHandler("koniec", end_cmd))
