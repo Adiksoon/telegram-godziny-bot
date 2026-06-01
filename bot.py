@@ -739,13 +739,8 @@ def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
         "Data",
         "Start",
         "Koniec",
-        "Przerwy",
         "Czas pracy",
         "Godziny",
-        "Stawka",
-        "Zarobek",
-        "Rozliczone",
-        "Auto koniec",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -759,27 +754,16 @@ def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
     for shift in shifts:
         start = parse_dt(shift["start_at"])
         end = parse_dt(shift["end_at"]) if shift["end_at"] else None
-        breaks = conn.execute("SELECT * FROM breaks WHERE shift_id = ? ORDER BY start_at", (shift["id"],)).fetchall()
-        break_text = ", ".join(
-            f"{fmt_time(parse_dt(br['start_at']))}-{fmt_time(parse_dt(br['end_at'])) if br['end_at'] else 'trwa'}"
-            for br in breaks
-        )
         seconds = shift_work_seconds(conn, shift)
         hours = round(seconds / 3600, 2)
-        rate = shift_rate(shift)
         ws.append(
             [
                 shift["id"],
                 start.strftime("%Y-%m-%d"),
                 fmt_time(start),
                 fmt_time(end) if end else "",
-                break_text,
                 fmt_duration(seconds),
                 hours,
-                rate,
-                round(seconds / 3600 * rate, 2),
-                "tak" if shift["paid_out_at"] else "nie",
-                "tak" if shift["auto_closed"] else "nie",
             ]
         )
 
