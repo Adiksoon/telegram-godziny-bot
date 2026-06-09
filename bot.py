@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, filters
 
 
@@ -30,6 +30,13 @@ BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 HOURLY_RATE = float(os.getenv("HOURLY_RATE", "31.5").replace(",", "."))
 TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
 ASK_DETAILS = 0
+
+# Stany konwersacji podsumowania dnia
+END_MAIN_TASK = 1
+END_ENERGY = 2
+END_SENS = 3
+END_FRUSTRATION = 4
+END_WORK_MODE = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -142,7 +149,12 @@ def init_db() -> None:
                     hourly_rate REAL NOT NULL DEFAULT 31.5,
                     auto_closed INTEGER NOT NULL DEFAULT 0,
                     paid_out_at TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    main_task TEXT,
+                    energy INTEGER,
+                    sens INTEGER,
+                    frustracja INTEGER,
+                    work_mode TEXT
                 );
                 """
             )
@@ -167,6 +179,20 @@ def init_db() -> None:
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_shifts_user_start ON shifts(user_id, start_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_breaks_shift ON breaks(shift_id)")
+            
+            # Dodatkowe weryfikowanie kolumn dla PostgreSQL w przypadku, gdy tabela juz istniala
+            cursor = conn.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'shifts'")
+            columns = {row["column_name"] for row in cursor.fetchall()}
+            if "main_task" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN main_task TEXT")
+            if "energy" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN energy INTEGER")
+            if "sens" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN sens INTEGER")
+            if "frustracja" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN frustracja INTEGER")
+            if "work_mode" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN work_mode TEXT")
         else:
             conn.executescript(
                 """
@@ -178,7 +204,12 @@ def init_db() -> None:
                     hourly_rate REAL NOT NULL DEFAULT 31.5,
                     auto_closed INTEGER NOT NULL DEFAULT 0,
                     paid_out_at TEXT,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    main_task TEXT,
+                    energy INTEGER,
+                    sens INTEGER,
+                    frustracja INTEGER,
+                    work_mode TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS user_settings (
@@ -201,6 +232,16 @@ def init_db() -> None:
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(shifts)").fetchall()}
             if "hourly_rate" not in columns:
                 conn.execute("ALTER TABLE shifts ADD COLUMN hourly_rate REAL NOT NULL DEFAULT 31.5")
+            if "main_task" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN main_task TEXT")
+            if "energy" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN energy INTEGER")
+            if "sens" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN sens INTEGER")
+            if "frustracja" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN frustracja INTEGER")
+            if "work_mode" not in columns:
+                conn.execute("ALTER TABLE shifts ADD COLUMN work_mode TEXT")
             conn.execute("UPDATE shifts SET hourly_rate = ? WHERE hourly_rate IS NULL", (HOURLY_RATE,))
 
 
@@ -582,7 +623,20 @@ async def break_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await send(update, f"Przerwa zapisana od {fmt_time(current)}. Po przerwie wpisz /start.")
 
 
-async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+RATING_KEYBOARD = ReplyKeyboardMarkup(
+    [["1", "2", "3", "4", "5"], ["6", "7", "8", "9", "10"], ["Pomiń"]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
+WORK_MODE_KEYBOARD = ReplyKeyboardMarkup(
+    [["Solo", "Ludzie", "Klient"], ["Nauka", "Debug"], ["Pomiń"]],
+    resize_keyboard=True,
+    one_time_keyboard=True,
+)
+
+
+async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user_id = update.effective_user.id
     current = now_local()
     with db() as conn:
@@ -590,7 +644,7 @@ async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         shift = get_open_shift(conn, user_id)
         if not shift:
             await send(update, "Nie widze aktywnej zmiany do zakonczenia.")
-            return
+            return ConversationHandler.END
 
         open_break = get_open_break(conn, shift["id"])
         end_at = parse_dt(open_break["start_at"]) if open_break else current
@@ -613,6 +667,165 @@ async def end_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 ]
             ),
         )
+        
+        # Zapisz ID zmiany w user_data na potrzeby ankiety
+        context.user_data["end_shift_id"] = shift["id"]
+        
+        await send(
+            update,
+            "Pytania podsumowujace dzien (mozesz pominac przez /pomin lub anulowac przez /anuluj):\n\n"
+            "1. Zadanie glowne: Jakie bylo glowne zadanie dzisiaj? (np. TCP/IP, kamera, dokumentacja)"
+        )
+        return END_MAIN_TASK
+
+
+async def end_main_task_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    shift_id = context.user_data.get("end_shift_id")
+    if shift_id:
+        with db() as conn:
+            conn.execute("UPDATE shifts SET main_task = ? WHERE id = ?", (text, shift_id))
+    
+    return await end_main_task_skipped(update, context)
+
+
+async def end_main_task_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(
+        update,
+        "2. Energia: Jak oceniasz poziom swojej energii? (Wpisz liczbe od 1 do 10)",
+        reply_markup=RATING_KEYBOARD
+    )
+    return END_ENERGY
+
+
+async def end_energy_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    try:
+        val = int(text)
+        if not (1 <= val <= 10):
+            raise ValueError()
+    except ValueError:
+        await send(
+            update,
+            "Ocena musi byc liczba od 1 do 10. Wybierz z klawiatury lub wpisz liczbe:",
+            reply_markup=RATING_KEYBOARD
+        )
+        return END_ENERGY
+        
+    shift_id = context.user_data.get("end_shift_id")
+    if shift_id:
+        with db() as conn:
+            conn.execute("UPDATE shifts SET energy = ? WHERE id = ?", (val, shift_id))
+            
+    return await end_energy_skipped(update, context)
+
+
+async def end_energy_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(
+        update,
+        "3. Sens: Jak oceniasz sens dzisiejszej pracy? (Wpisz liczbe od 1 do 10)",
+        reply_markup=RATING_KEYBOARD
+    )
+    return END_SENS
+
+
+async def end_sens_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    try:
+        val = int(text)
+        if not (1 <= val <= 10):
+            raise ValueError()
+    except ValueError:
+        await send(
+            update,
+            "Ocena musi byc liczba od 1 do 10. Wybierz z klawiatury lub wpisz liczbe:",
+            reply_markup=RATING_KEYBOARD
+        )
+        return END_SENS
+        
+    shift_id = context.user_data.get("end_shift_id")
+    if shift_id:
+        with db() as conn:
+            conn.execute("UPDATE shifts SET sens = ? WHERE id = ?", (val, shift_id))
+            
+    return await end_sens_skipped(update, context)
+
+
+async def end_sens_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(
+        update,
+        "4. Frustracja: Jak oceniasz poziom dzisiejszej frustracji? (Wpisz liczbe od 1 do 10)",
+        reply_markup=RATING_KEYBOARD
+    )
+    return END_FRUSTRATION
+
+
+async def end_frustration_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    try:
+        val = int(text)
+        if not (1 <= val <= 10):
+            raise ValueError()
+    except ValueError:
+        await send(
+            update,
+            "Ocena musi byc liczba od 1 do 10. Wybierz z klawiatury lub wpisz liczbe:",
+            reply_markup=RATING_KEYBOARD
+        )
+        return END_FRUSTRATION
+        
+    shift_id = context.user_data.get("end_shift_id")
+    if shift_id:
+        with db() as conn:
+            conn.execute("UPDATE shifts SET frustracja = ? WHERE id = ?", (val, shift_id))
+            
+    return await end_frustration_skipped(update, context)
+
+
+async def end_frustration_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(
+        update,
+        "5. Tryb pracy: W jakim trybie pracowales?",
+        reply_markup=WORK_MODE_KEYBOARD
+    )
+    return END_WORK_MODE
+
+
+async def end_work_mode_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    valid_modes = {"Solo", "Ludzie", "Klient", "Nauka", "Debug"}
+    matched = None
+    for mode in valid_modes:
+        if mode.lower() == text.lower():
+            matched = mode
+            break
+            
+    if not matched:
+        await send(
+            update,
+            "Nieprawidlowy tryb pracy. Wybierz z klawiatury (Solo, Ludzie, Klient, Nauka, Debug) lub wpisz 'Pomin':",
+            reply_markup=WORK_MODE_KEYBOARD
+        )
+        return END_WORK_MODE
+        
+    shift_id = context.user_data.get("end_shift_id")
+    if shift_id:
+        with db() as conn:
+            conn.execute("UPDATE shifts SET work_mode = ? WHERE id = ?", (matched, shift_id))
+            
+    return await end_work_mode_skipped(update, context)
+
+
+async def end_work_mode_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(update, "Dziekuje! Dane podsumowujace zmiane zostaly zapisane.", reply_markup=ReplyKeyboardRemove())
+    context.user_data.pop("end_shift_id", None)
+    return ConversationHandler.END
+
+
+async def cancel_end_survey(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    await send(update, "Anulowano podsumowanie dnia. Zmiana zostala zapisana bez dodatkowych metryk.", reply_markup=ReplyKeyboardRemove())
+    context.user_data.pop("end_shift_id", None)
+    return ConversationHandler.END
 
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -746,6 +959,11 @@ def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
         "Zarobek",
         "Rozliczone",
         "Auto koniec",
+        "Zadanie glowne",
+        "Energia",
+        "Sens",
+        "Frustracja",
+        "Tryb pracy",
     ]
     ws.append(headers)
     for cell in ws[1]:
@@ -767,6 +985,14 @@ def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
         seconds = shift_work_seconds(conn, shift)
         hours = round(seconds / 3600, 2)
         rate = shift_rate(shift)
+        
+        keys = shift.keys()
+        main_task = shift["main_task"] if "main_task" in keys else ""
+        energy = shift["energy"] if "energy" in keys else ""
+        sens = shift["sens"] if "sens" in keys else ""
+        frustracja = shift["frustracja"] if "frustracja" in keys else ""
+        work_mode = shift["work_mode"] if "work_mode" in keys else ""
+
         ws.append(
             [
                 shift["id"],
@@ -780,6 +1006,11 @@ def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
                 round(seconds / 3600 * rate, 2),
                 "tak" if shift["paid_out_at"] else "nie",
                 "tak" if shift["auto_closed"] else "nie",
+                main_task if main_task is not None else "",
+                energy if energy is not None else "",
+                sens if sens is not None else "",
+                frustracja if frustracja is not None else "",
+                work_mode if work_mode is not None else "",
             ]
         )
 
@@ -965,7 +1196,25 @@ def format_shift_line(conn: sqlite3.Connection, shift: sqlite3.Row) -> str:
             f"#{b['id']} {fmt_time(parse_dt(b['start_at']))}-{fmt_time(parse_dt(b['end_at'])) if b['end_at'] else 'trwa'}"
             for b in breaks
         )
-    return f"#{number} {fmt_dt(start)} - {fmt_time(end) if end else 'trwa'} | {fmt_duration(seconds)} | {fmt_money(shift_earnings(conn, shift))}{br}"
+    
+    details = []
+    keys = shift.keys()
+    if "main_task" in keys and shift["main_task"]:
+        details.append(f"zadanie: {shift['main_task']}")
+    if "energy" in keys and shift["energy"] is not None:
+        details.append(f"energia: {shift['energy']}/10")
+    if "sens" in keys and shift["sens"] is not None:
+        details.append(f"sens: {shift['sens']}/10")
+    if "frustracja" in keys and shift["frustracja"] is not None:
+        details.append(f"frustracja: {shift['frustracja']}/10")
+    if "work_mode" in keys and shift["work_mode"]:
+        details.append(f"tryb: {shift['work_mode']}")
+        
+    det_str = ""
+    if details:
+        det_str = " | " + ", ".join(details)
+        
+    return f"#{number} {fmt_dt(start)} - {fmt_time(end) if end else 'trwa'} | {fmt_duration(seconds)} | {fmt_money(shift_earnings(conn, shift))}{br}{det_str}"
 
 
 async def delete_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1053,6 +1302,11 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                             "/popraw usun NUMER",
                             "/popraw przerwa NUMER dodaj HH:MM HH:MM",
                             "/popraw przerwa NUMER usun BREAK_ID",
+                            "/popraw zadanie NUMER [tekst albo brak]",
+                            "/popraw energia NUMER [1-10 albo brak]",
+                            "/popraw sens NUMER [1-10 albo brak]",
+                            "/popraw frustracja NUMER [1-10 albo brak]",
+                            "/popraw tryb NUMER [Solo/Ludzie/Klient/Nauka/Debug albo brak]",
                         ]
                     ),
                 )
@@ -1085,7 +1339,7 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 await send(update, "Dodano zmiane.")
                 return
 
-            if action in {"start", "koniec", "usun"}:
+            if action in {"start", "koniec", "usun", "zadanie", "energia", "sens", "frustracja", "tryb"}:
                 shift_number_ref = int(args[1])
                 shift = get_shift_by_number(conn, user_id, shift_number_ref)
                 if not shift:
@@ -1110,6 +1364,63 @@ async def edit_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                         new_end = combine(day, args[2])
                         conn.execute("UPDATE shifts SET end_at = ?, auto_closed = 0 WHERE id = ?", (iso(new_end), shift_id))
                     await send(update, "Poprawiono koniec.")
+                    return
+                if action == "zadanie" and len(args) >= 3:
+                    task_text = " ".join(args[2:])
+                    if task_text.lower() == "brak":
+                        conn.execute("UPDATE shifts SET main_task = NULL WHERE id = ?", (shift_id,))
+                    else:
+                        conn.execute("UPDATE shifts SET main_task = ? WHERE id = ?", (task_text, shift_id))
+                    await send(update, "Poprawiono zadanie.")
+                    return
+                if action == "energia" and len(args) == 3:
+                    val_str = args[2]
+                    if val_str.lower() == "brak":
+                        conn.execute("UPDATE shifts SET energy = NULL WHERE id = ?", (shift_id,))
+                    else:
+                        val = int(val_str)
+                        if not (1 <= val <= 10):
+                            raise ValueError("Ocena musi byc od 1 do 10.")
+                        conn.execute("UPDATE shifts SET energy = ? WHERE id = ?", (val, shift_id))
+                    await send(update, "Poprawiono energie.")
+                    return
+                if action == "sens" and len(args) == 3:
+                    val_str = args[2]
+                    if val_str.lower() == "brak":
+                        conn.execute("UPDATE shifts SET sens = NULL WHERE id = ?", (shift_id,))
+                    else:
+                        val = int(val_str)
+                        if not (1 <= val <= 10):
+                            raise ValueError("Ocena musi byc od 1 do 10.")
+                        conn.execute("UPDATE shifts SET sens = ? WHERE id = ?", (val, shift_id))
+                    await send(update, "Poprawiono sens.")
+                    return
+                if action == "frustracja" and len(args) == 3:
+                    val_str = args[2]
+                    if val_str.lower() == "brak":
+                        conn.execute("UPDATE shifts SET frustracja = NULL WHERE id = ?", (shift_id,))
+                    else:
+                        val = int(val_str)
+                        if not (1 <= val <= 10):
+                            raise ValueError("Ocena musi byc od 1 do 10.")
+                        conn.execute("UPDATE shifts SET frustracja = ? WHERE id = ?", (val, shift_id))
+                    await send(update, "Poprawiono frustracje.")
+                    return
+                if action == "tryb" and len(args) == 3:
+                    mode_str = args[2]
+                    if mode_str.lower() == "brak":
+                        conn.execute("UPDATE shifts SET work_mode = NULL WHERE id = ?", (shift_id,))
+                    else:
+                        valid_modes = {"Solo", "Ludzie", "Klient", "Nauka", "Debug"}
+                        matched = None
+                        for mode in valid_modes:
+                            if mode.lower() == mode_str.lower():
+                                matched = mode
+                                break
+                        if not matched:
+                            raise ValueError("Dozwolone tryby: Solo, Ludzie, Klient, Nauka, Debug.")
+                        conn.execute("UPDATE shifts SET work_mode = ? WHERE id = ?", (matched, shift_id))
+                    await send(update, "Poprawiono tryb pracy.")
                     return
 
             if action == "przerwa" and len(args) >= 4:
@@ -1255,10 +1566,43 @@ def main() -> None:
         fallbacks=[CommandHandler("anuluj", cancel_fill)],
     )
     app.add_handler(fill_handler)
+
+    end_handler = ConversationHandler(
+        entry_points=[CommandHandler("koniec", end_cmd)],
+        states={
+            END_MAIN_TASK: [
+                CommandHandler("pomin", end_main_task_skipped),
+                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_main_task_skipped),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, end_main_task_received),
+            ],
+            END_ENERGY: [
+                CommandHandler("pomin", end_energy_skipped),
+                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_energy_skipped),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, end_energy_received),
+            ],
+            END_SENS: [
+                CommandHandler("pomin", end_sens_skipped),
+                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_sens_skipped),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, end_sens_received),
+            ],
+            END_FRUSTRATION: [
+                CommandHandler("pomin", end_frustration_skipped),
+                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_frustration_skipped),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, end_frustration_received),
+            ],
+            END_WORK_MODE: [
+                CommandHandler("pomin", end_work_mode_skipped),
+                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_work_mode_skipped),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, end_work_mode_received),
+            ],
+        },
+        fallbacks=[CommandHandler("anuluj", cancel_end_survey)],
+    )
+    app.add_handler(end_handler)
+
     app.add_handler(CallbackQueryHandler(callback_query_handler))
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("przerwa", break_cmd))
-    app.add_handler(CommandHandler("koniec", end_cmd))
     app.add_handler(CommandHandler("status", status_cmd))
     app.add_handler(CommandHandler("dodaj", quick_add_cmd))
     app.add_handler(CommandHandler("lista", list_cmd))

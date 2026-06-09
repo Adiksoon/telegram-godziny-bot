@@ -50,10 +50,18 @@ try:
     sqlite_shifts = sqlite_conn.execute("SELECT * FROM shifts ORDER BY id").fetchall()
     pg_cur.execute("TRUNCATE TABLE shifts CASCADE")
     for row in sqlite_shifts:
+        keys = row.keys()
+        main_task = row["main_task"] if "main_task" in keys else None
+        energy = row["energy"] if "energy" in keys else None
+        sens = row["sens"] if "sens" in keys else None
+        frustracja = row["frustracja"] if "frustracja" in keys else None
+        work_mode = row["work_mode"] if "work_mode" in keys else None
+
         pg_cur.execute(
-            "INSERT INTO shifts (id, user_id, start_at, end_at, hourly_rate, auto_closed, paid_out_at, created_at) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (row["id"], row["user_id"], row["start_at"], row["end_at"], row["hourly_rate"], row["auto_closed"], row["paid_out_at"], row["created_at"])
+            "INSERT INTO shifts (id, user_id, start_at, end_at, hourly_rate, auto_closed, paid_out_at, created_at, main_task, energy, sens, frustracja, work_mode) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (row["id"], row["user_id"], row["start_at"], row["end_at"], row["hourly_rate"], row["auto_closed"], row["paid_out_at"], row["created_at"],
+             main_task, energy, sens, frustracja, work_mode)
         )
     print(f"Skopiowano {len(sqlite_shifts)} wierszy.")
 
