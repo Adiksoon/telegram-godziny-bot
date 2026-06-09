@@ -41,9 +41,10 @@ TIMEZONE=Europe/Warsaw
 - `/stawka 31,50` - zmienia stawke dla kolejnych zmian oraz aktywnej zmiany.
 - `/wyplata` - zeruje kwote "od ostatniej wyplaty" przez oznaczenie zakonczonych zmian jako rozliczone.
 - `/csv` - wysyla plik `.csv` z historia i podsumowaniem (rozdzielany średnikami, kompatybilny z polskim Excelem).
-- `/ksiegowa` - wysyla prosty plik `.csv` dla ksiegowej za biezacy miesiac: data, start, koniec, liczba godzin.
-- `/ksiegowa YYYY-MM` - wysyla prosty plik `.csv` dla ksiegowej za wybrany miesiac, np. `/ksiegowa 2026-05`.
-- `/popraw` - reczna edycja godzin.
+- `/ksiegowa` - pyta interaktywnie o okres (bieżący miesiąc, poprzedni miesiąc, cała historia) i wysyła prosty plik `.csv` dla księgowej.
+- `/ksiegowa YYYY-MM` - wysyła prosty plik `.csv` dla księgowej za wybrany miesiąc, np. `/ksiegowa 2026-05`.
+- `/kopia` - wysyła plik lokalnej bazy danych SQLite (`work_hours.sqlite3`) jako kopię zapasową.
+- `/popraw` - ręczna edycja godzin.
 - `/pomoc` - pokazuje pomoc.
 
 ## Reczna edycja

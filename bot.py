@@ -27,7 +27,10 @@ load_dotenv(ROOT / ".env")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 HOURLY_RATE = float(os.getenv("HOURLY_RATE", "31.5").replace(",", "."))
-TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
+try:
+    TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
+except Exception:
+    TZ = ZoneInfo("Europe/Warsaw")
 ASK_DETAILS = 0
 
 # Stany konwersacji podsumowania dnia
@@ -128,6 +131,7 @@ def db() -> Iterator[Any]:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
         try:
             yield conn
             conn.commit()
@@ -1031,16 +1035,22 @@ def build_csv(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
         writer.writerow(["Lacznie - zarobek", f"{total.earnings:.2f} zl".replace(".", ",")])
 
 
-def build_accountant_csv(conn: sqlite3.Connection, user_id: int, path: Path, first: date, next_month: date) -> None:
+def build_accountant_csv(conn: sqlite3.Connection, user_id: int, path: Path, first: date | None = None, next_month: date | None = None) -> None:
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f, delimiter=";")
         headers = ["Data", "Start", "Koniec", "Liczba godzin"]
         writer.writerow(headers)
 
-        shifts = conn.execute(
-            "SELECT * FROM shifts WHERE user_id = ? AND start_at >= ? AND start_at < ? AND end_at IS NOT NULL ORDER BY start_at",
-            (user_id, iso(datetime.combine(first, time.min, TZ)), iso(datetime.combine(next_month, time.min, TZ))),
-        ).fetchall()
+        if first and next_month:
+            shifts = conn.execute(
+                "SELECT * FROM shifts WHERE user_id = ? AND start_at >= ? AND start_at < ? AND end_at IS NOT NULL ORDER BY start_at",
+                (user_id, iso(datetime.combine(first, time.min, TZ)), iso(datetime.combine(next_month, time.min, TZ))),
+            ).fetchall()
+        else:
+            shifts = conn.execute(
+                "SELECT * FROM shifts WHERE user_id = ? AND end_at IS NOT NULL ORDER BY start_at",
+                (user_id,),
+            ).fetchall()
 
         total_hours = 0.0
         for shift in shifts:
@@ -1057,6 +1067,26 @@ def build_accountant_csv(conn: sqlite3.Connection, user_id: int, path: Path, fir
 
         writer.writerow([])
         writer.writerow(["Razem", "", "", str(round(total_hours, 2)).replace(".", ",")])
+
+
+async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if IS_POSTGRES:
+        await send(
+            update,
+            "Uzywasz bazy danych PostgreSQL. Kopie zapasowe sa tworzone automatycznie po stronie serwera."
+        )
+        return
+
+    if not DB_PATH.exists():
+        await send(update, "Lokalna baza danych SQLite jeszcze nie istnieje.")
+        return
+
+    if update.effective_message:
+        await update.effective_message.reply_document(
+            DB_PATH.open("rb"),
+            filename=DB_PATH.name,
+            caption="Kopia zapasowa bazy danych SQLite (work_hours.sqlite3)."
+        )
 
 
 async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1078,23 +1108,49 @@ async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def accountant_csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     current = now_local()
-    try:
-        first, next_month, label = month_bounds(context.args[0] if context.args else None, current)
-    except ValueError:
-        await send(update, "Miesiac wpisz jako YYYY-MM.\n\nPrzyklad:\n/ksiegowa 2026-05")
+    
+    # Jeśli użytkownik podał argument (np. /ksiegowa 2026-05), generujemy raport od razu
+    if context.args:
+        try:
+            first, next_month, label = month_bounds(context.args[0], current)
+        except ValueError:
+            await send(update, "Miesiac wpisz jako YYYY-MM.\n\nPrzyklad:\n/ksiegowa 2026-05")
+            return
+
+        with db() as conn:
+            close_stale_breaks(conn, user_id, current)
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / f"ewidencja_ksiegowa_{label}.csv"
+                build_accountant_csv(conn, user_id, path, first, next_month)
+                if update.effective_message:
+                    await update.effective_message.reply_document(
+                        path.open("rb"),
+                        filename=path.name,
+                        caption=f"Ewidencja godzin dla ksiegowej (CSV): {label}.",
+                    )
         return
 
-    with db() as conn:
-        close_stale_breaks(conn, user_id, current)
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / f"ewidencja_ksiegowa_{label}.csv"
-            build_accountant_csv(conn, user_id, path, first, next_month)
-            if update.effective_message:
-                await update.effective_message.reply_document(
-                    path.open("rb"),
-                    filename=path.name,
-                    caption=f"Ewidencja godzin dla ksiegowej (CSV): {label}.",
-                )
+    # Jeśli brak argumentów, wyświetlamy menu wyboru okresu
+    curr_label = current.strftime("%Y-%m")
+    this_month_first = current.date().replace(day=1)
+    prev_month_day = this_month_first - timedelta(days=5)
+    prev_label = prev_month_day.strftime("%Y-%m")
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(f"📅 Bieżący miesiąc ({curr_label})", callback_data="acct:curr"),
+            InlineKeyboardButton(f"📅 Poprzedni miesiąc ({prev_label})", callback_data="acct:prev"),
+        ],
+        [
+            InlineKeyboardButton("🗄️ Cała historia", callback_data="acct:all")
+        ]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await send(
+        update,
+        "*Ewidencja dla księgowej:*\nWybierz okres raportu lub wpisz ręcznie np. `/ksiegowa YYYY-MM`:",
+        reply_markup=reply_markup
+    )
 
 
 async def quick_add_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1468,7 +1524,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "/stawka - podglad albo zmiana stawki",
                 "/wyplata - wyzerowanie okresu od ostatniej wyplaty",
                 "/csv - eksport historii do pliku CSV",
-                "/ksiegowa - prosty plik CSV dla ksiegowej",
+                "/ksiegowa - ewidencja dla ksiegowej z wyborem okresu",
+                "/kopia - kopia zapasowa bazy danych SQLite",
                 "/popraw - reczna edycja godzin",
             ]
         ),
@@ -1542,6 +1599,39 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
         except ValueError as exc:
             await query.edit_message_text(f"Błąd podczas szybkiego dodawania: {exc}")
 
+    elif data.startswith("acct:"):
+        _, period = data.split(":")
+        first = None
+        next_month = None
+        label = "Cala historia"
+        
+        if period == "curr":
+            first, next_month, label = month_bounds(None, current)
+        elif period == "prev":
+            this_month_first = current.date().replace(day=1)
+            prev_month_day = this_month_first - timedelta(days=5)
+            first, next_month, label = month_bounds(prev_month_day.strftime("%Y-%m"), current)
+            
+        with db() as conn:
+            close_stale_breaks(conn, user_id, current)
+            with tempfile.TemporaryDirectory() as tmp:
+                filename_label = label.replace("-", "_")
+                path = Path(tmp) / f"ewidencja_ksiegowa_{filename_label}.csv"
+                build_accountant_csv(conn, user_id, path, first, next_month)
+                
+                caption_text = f"Ewidencja godzin dla ksiegowej: {label}."
+                if period == "all":
+                    caption_text = "Ewidencja godzin dla ksiegowej: Cała historia."
+                    
+                await query.edit_message_text(f"Generuję ewidencję dla: {label}...")
+                if update.effective_chat:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=path.open("rb"),
+                        filename=path.name,
+                        caption=caption_text
+                    )
+
 
 def main() -> None:
     if not BOT_TOKEN or BOT_TOKEN == "wklej_tutaj_token_od_BotFather":
@@ -1613,6 +1703,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stawka", rate_cmd))
     app.add_handler(CommandHandler("wyplata", payout_cmd))
     app.add_handler(CommandHandler("csv", csv_cmd))
+    app.add_handler(CommandHandler("kopia", backup_cmd))
     app.add_handler(CommandHandler("ksiegowa", accountant_csv_cmd))
     app.add_handler(CommandHandler("popraw", edit_cmd))
     app.add_handler(CommandHandler("pomoc", help_cmd))
