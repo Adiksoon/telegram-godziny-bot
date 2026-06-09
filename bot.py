@@ -14,9 +14,8 @@ from pathlib import Path
 from typing import Iterable, Iterator, Any
 from zoneinfo import ZoneInfo
 
+import csv
 from dotenv import load_dotenv
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, ContextTypes, ConversationHandler, MessageHandler, CallbackQueryHandler, filters
 
@@ -828,6 +827,16 @@ async def cancel_end_survey(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     return ConversationHandler.END
 
 
+async def command_escape_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    context.user_data.pop("end_shift_id", None)
+    await send(
+        update,
+        "Przerwano aktywny formularz, poniewaz wpisales inna komende. Wpisz ja jeszcze raz, aby ja uruchomic.",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ConversationHandler.END
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     current = now_local()
@@ -939,149 +948,134 @@ async def report_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for day, day_totals in list(daily.items())[:25]:
             lines.append(f"{day}: {fmt_duration(day_totals.seconds)} / {fmt_money(day_totals.earnings)}")
         if len(daily) > 25:
-            lines.append(f"... i jeszcze {len(daily) - 25} dni. Pelna lista jest w /excel.")
+            lines.append(f"... i jeszcze {len(daily) - 25} dni. Pelna lista jest w /csv.")
         await send(update, "\n".join(lines))
 
 
-def build_excel(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Godziny"
-    headers = [
-        "ID",
-        "Data",
-        "Start",
-        "Koniec",
-        "Przerwy",
-        "Czas pracy",
-        "Godziny",
-        "Stawka",
-        "Zarobek",
-        "Rozliczone",
-        "Auto koniec",
-        "Zadanie glowne",
-        "Energia",
-        "Sens",
-        "Frustracja",
-        "Tryb pracy",
-    ]
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="D9EAF7")
+def build_csv(conn: sqlite3.Connection, user_id: int, path: Path) -> None:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        headers = [
+            "ID",
+            "Data",
+            "Start",
+            "Koniec",
+            "Przerwy",
+            "Czas pracy",
+            "Godziny",
+            "Stawka",
+            "Zarobek",
+            "Rozliczone",
+            "Auto koniec",
+            "Zadanie glowne",
+            "Energia",
+            "Sens",
+            "Frustracja",
+            "Tryb pracy",
+        ]
+        writer.writerow(headers)
 
-    shifts = conn.execute(
-        "SELECT * FROM shifts WHERE user_id = ? ORDER BY start_at",
-        (user_id,),
-    ).fetchall()
-    for shift in shifts:
-        start = parse_dt(shift["start_at"])
-        end = parse_dt(shift["end_at"]) if shift["end_at"] else None
-        breaks = conn.execute("SELECT * FROM breaks WHERE shift_id = ? ORDER BY start_at", (shift["id"],)).fetchall()
-        break_text = ", ".join(
-            f"{fmt_time(parse_dt(br['start_at']))}-{fmt_time(parse_dt(br['end_at'])) if br['end_at'] else 'trwa'}"
-            for br in breaks
-        )
-        seconds = shift_work_seconds(conn, shift)
-        hours = round(seconds / 3600, 2)
-        rate = shift_rate(shift)
+        shifts = conn.execute(
+            "SELECT * FROM shifts WHERE user_id = ? ORDER BY start_at",
+            (user_id,),
+        ).fetchall()
+        for shift in shifts:
+            start = parse_dt(shift["start_at"])
+            end = parse_dt(shift["end_at"]) if shift["end_at"] else None
+            breaks = conn.execute("SELECT * FROM breaks WHERE shift_id = ? ORDER BY start_at", (shift["id"],)).fetchall()
+            break_text = ", ".join(
+                f"{fmt_time(parse_dt(br['start_at']))}-{fmt_time(parse_dt(br['end_at'])) if br['end_at'] else 'trwa'}"
+                for br in breaks
+            )
+            seconds = shift_work_seconds(conn, shift)
+            hours = round(seconds / 3600, 2)
+            rate = shift_rate(shift)
+            
+            keys = shift.keys()
+            main_task = shift["main_task"] if "main_task" in keys else ""
+            energy = shift["energy"] if "energy" in keys else ""
+            sens = shift["sens"] if "sens" in keys else ""
+            frustracja = shift["frustracja"] if "frustracja" in keys else ""
+            work_mode = shift["work_mode"] if "work_mode" in keys else ""
+
+            writer.writerow(
+                [
+                    shift["id"],
+                    start.strftime("%Y-%m-%d"),
+                    fmt_time(start),
+                    fmt_time(end) if end else "",
+                    break_text,
+                    fmt_duration(seconds),
+                    str(hours).replace(".", ","),
+                    str(rate).replace(".", ","),
+                    str(round(seconds / 3600 * rate, 2)).replace(".", ","),
+                    "tak" if shift["paid_out_at"] else "nie",
+                    "tak" if shift["auto_closed"] else "nie",
+                    main_task if main_task is not None else "",
+                    energy if energy is not None else "",
+                    sens if sens is not None else "",
+                    frustracja if frustracja is not None else "",
+                    work_mode if work_mode is not None else "",
+                ]
+            )
+
+        writer.writerow([])
+        writer.writerow([])
         
-        keys = shift.keys()
-        main_task = shift["main_task"] if "main_task" in keys else ""
-        energy = shift["energy"] if "energy" in keys else ""
-        sens = shift["sens"] if "sens" in keys else ""
-        frustracja = shift["frustracja"] if "frustracja" in keys else ""
-        work_mode = shift["work_mode"] if "work_mode" in keys else ""
+        unpaid, total = user_totals(conn, user_id)
+        writer.writerow(["Metryka", "Wartosc"])
+        writer.writerow(["Aktualna stawka", f"{get_user_rate(conn, user_id):.2f} zl/h".replace(".", ",")])
+        writer.writerow(["Od ostatniej wyplaty - czas", fmt_duration(unpaid.seconds)])
+        writer.writerow(["Od ostatniej wyplaty - zarobek", f"{unpaid.earnings:.2f} zl".replace(".", ",")])
+        writer.writerow(["Lacznie - czas", fmt_duration(total.seconds)])
+        writer.writerow(["Lacznie - zarobek", f"{total.earnings:.2f} zl".replace(".", ",")])
 
-        ws.append(
-            [
-                shift["id"],
+
+def build_accountant_csv(conn: sqlite3.Connection, user_id: int, path: Path, first: date, next_month: date) -> None:
+    with open(path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f, delimiter=";")
+        headers = ["Data", "Start", "Koniec", "Liczba godzin"]
+        writer.writerow(headers)
+
+        shifts = conn.execute(
+            "SELECT * FROM shifts WHERE user_id = ? AND start_at >= ? AND start_at < ? AND end_at IS NOT NULL ORDER BY start_at",
+            (user_id, iso(datetime.combine(first, time.min, TZ)), iso(datetime.combine(next_month, time.min, TZ))),
+        ).fetchall()
+
+        total_hours = 0.0
+        for shift in shifts:
+            start = parse_dt(shift["start_at"])
+            end = parse_dt(shift["end_at"])
+            hours = round(shift_work_seconds(conn, shift) / 3600, 2)
+            total_hours += hours
+            writer.writerow([
                 start.strftime("%Y-%m-%d"),
                 fmt_time(start),
-                fmt_time(end) if end else "",
-                break_text,
-                fmt_duration(seconds),
-                hours,
-                rate,
-                round(seconds / 3600 * rate, 2),
-                "tak" if shift["paid_out_at"] else "nie",
-                "tak" if shift["auto_closed"] else "nie",
-                main_task if main_task is not None else "",
-                energy if energy is not None else "",
-                sens if sens is not None else "",
-                frustracja if frustracja is not None else "",
-                work_mode if work_mode is not None else "",
-            ]
-        )
+                fmt_time(end),
+                str(hours).replace(".", ",")
+            ])
 
-    unpaid, total = user_totals(conn, user_id)
-    summary = wb.create_sheet("Podsumowanie")
-    summary.append(["Metryka", "Wartosc"])
-    summary.append(["Aktualna stawka", f"{get_user_rate(conn, user_id):.2f} zl/h"])
-    summary.append(["Od ostatniej wyplaty - czas", fmt_duration(unpaid.seconds)])
-    summary.append(["Od ostatniej wyplaty - zarobek", round(unpaid.earnings, 2)])
-    summary.append(["Lacznie - czas", fmt_duration(total.seconds)])
-    summary.append(["Lacznie - zarobek", round(total.earnings, 2)])
-    for cell in summary[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="D9EAF7")
-    for column in summary.columns:
-        width = max(len(str(cell.value or "")) for cell in column) + 2
-        summary.column_dimensions[column[0].column_letter].width = min(width, 36)
-
-    for column in ws.columns:
-        width = max(len(str(cell.value or "")) for cell in column) + 2
-        ws.column_dimensions[column[0].column_letter].width = min(width, 36)
-    wb.save(path)
+        writer.writerow([])
+        writer.writerow(["Razem", "", "", str(round(total_hours, 2)).replace(".", ",")])
 
 
-def build_accountant_excel(conn: sqlite3.Connection, user_id: int, path: Path, first: date, next_month: date) -> None:
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Ewidencja"
-    headers = ["Data", "Start", "Koniec", "Liczba godzin"]
-    ws.append(headers)
-    for cell in ws[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill("solid", fgColor="D9EAF7")
-
-    shifts = conn.execute(
-        "SELECT * FROM shifts WHERE user_id = ? AND start_at >= ? AND start_at < ? AND end_at IS NOT NULL ORDER BY start_at",
-        (user_id, iso(datetime.combine(first, time.min, TZ)), iso(datetime.combine(next_month, time.min, TZ))),
-    ).fetchall()
-
-    total_hours = 0.0
-    for shift in shifts:
-        start = parse_dt(shift["start_at"])
-        end = parse_dt(shift["end_at"])
-        hours = round(shift_work_seconds(conn, shift) / 3600, 2)
-        total_hours += hours
-        ws.append([start.strftime("%Y-%m-%d"), fmt_time(start), fmt_time(end), hours])
-
-    ws.append([])
-    ws.append(["Razem", "", "", round(total_hours, 2)])
-    for cell in ws[ws.max_row]:
-        cell.font = Font(bold=True)
-
-    for column in ws.columns:
-        width = max(len(str(cell.value or "")) for cell in column) + 2
-        ws.column_dimensions[column[0].column_letter].width = min(width, 24)
-    wb.save(path)
-
-
-async def excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     current = now_local()
     with db() as conn:
         close_stale_breaks(conn, user_id, current)
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / f"godziny_{current.strftime('%Y%m%d_%H%M')}.xlsx"
-            build_excel(conn, user_id, path)
+            path = Path(tmp) / f"godziny_{current.strftime('%Y%m%d_%H%M')}.csv"
+            build_csv(conn, user_id, path)
             if update.effective_message:
-                await update.effective_message.reply_document(path.open("rb"), filename=path.name, caption="Eksport godzin do Excela.")
+                await update.effective_message.reply_document(
+                    path.open("rb"),
+                    filename=path.name,
+                    caption="Eksport godzin do pliku CSV (rozdzielany średnikami, UTF-8)."
+                )
 
 
-async def accountant_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def accountant_csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     current = now_local()
     try:
@@ -1093,13 +1087,13 @@ async def accountant_excel_cmd(update: Update, context: ContextTypes.DEFAULT_TYP
     with db() as conn:
         close_stale_breaks(conn, user_id, current)
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / f"ewidencja_ksiegowa_{label}.xlsx"
-            build_accountant_excel(conn, user_id, path, first, next_month)
+            path = Path(tmp) / f"ewidencja_ksiegowa_{label}.csv"
+            build_accountant_csv(conn, user_id, path, first, next_month)
             if update.effective_message:
                 await update.effective_message.reply_document(
                     path.open("rb"),
                     filename=path.name,
-                    caption=f"Ewidencja godzin dla ksiegowej: {label}.",
+                    caption=f"Ewidencja godzin dla ksiegowej (CSV): {label}.",
                 )
 
 
@@ -1473,8 +1467,8 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 "/raport - podsumowanie miesiaca",
                 "/stawka - podglad albo zmiana stawki",
                 "/wyplata - wyzerowanie okresu od ostatniej wyplaty",
-                "/excel - eksport historii do Excela",
-                "/ksiegowa - prosty Excel: data, start, koniec, liczba godzin",
+                "/csv - eksport historii do pliku CSV",
+                "/ksiegowa - prosty plik CSV dla ksiegowej",
                 "/popraw - reczna edycja godzin",
             ]
         ),
@@ -1561,7 +1555,10 @@ def main() -> None:
     fill_handler = ConversationHandler(
         entry_points=[CommandHandler("uzupelnij", fill_start_cmd)],
         states={
-            ASK_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, fill_details_message)],
+            ASK_DETAILS: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj)$"), command_escape_handler),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, fill_details_message),
+            ],
         },
         fallbacks=[CommandHandler("anuluj", cancel_fill)],
     )
@@ -1571,26 +1568,31 @@ def main() -> None:
         entry_points=[CommandHandler("koniec", end_cmd)],
         states={
             END_MAIN_TASK: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
                 CommandHandler("pomin", end_main_task_skipped),
                 MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_main_task_skipped),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, end_main_task_received),
             ],
             END_ENERGY: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
                 CommandHandler("pomin", end_energy_skipped),
                 MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_energy_skipped),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, end_energy_received),
             ],
             END_SENS: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
                 CommandHandler("pomin", end_sens_skipped),
                 MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_sens_skipped),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, end_sens_received),
             ],
             END_FRUSTRATION: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
                 CommandHandler("pomin", end_frustration_skipped),
                 MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_frustration_skipped),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, end_frustration_received),
             ],
             END_WORK_MODE: [
+                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
                 CommandHandler("pomin", end_work_mode_skipped),
                 MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_work_mode_skipped),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, end_work_mode_received),
@@ -1610,8 +1612,8 @@ def main() -> None:
     app.add_handler(CommandHandler("raport", report_cmd))
     app.add_handler(CommandHandler("stawka", rate_cmd))
     app.add_handler(CommandHandler("wyplata", payout_cmd))
-    app.add_handler(CommandHandler("excel", excel_cmd))
-    app.add_handler(CommandHandler("ksiegowa", accountant_excel_cmd))
+    app.add_handler(CommandHandler("csv", csv_cmd))
+    app.add_handler(CommandHandler("ksiegowa", accountant_csv_cmd))
     app.add_handler(CommandHandler("popraw", edit_cmd))
     app.add_handler(CommandHandler("pomoc", help_cmd))
     app.add_error_handler(error_handler)

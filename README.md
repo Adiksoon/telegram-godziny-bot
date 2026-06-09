@@ -1,6 +1,6 @@
 # Telegram Godziny Bot
 
-Bot zapisuje wejscia do pracy, przerwy, koniec dnia, zarobki oraz eksportuje historie do Excela.
+Bot zapisuje wejscia do pracy, przerwy, koniec dnia, zarobki oraz eksportuje historie do plikow CSV.
 
 ## Uruchomienie
 
@@ -40,9 +40,9 @@ TIMEZONE=Europe/Warsaw
 - `/stawka` - pokazuje aktualna stawke.
 - `/stawka 31,50` - zmienia stawke dla kolejnych zmian oraz aktywnej zmiany.
 - `/wyplata` - zeruje kwote "od ostatniej wyplaty" przez oznaczenie zakonczonych zmian jako rozliczone.
-- `/excel` - wysyla plik `.xlsx` z historia i arkuszem podsumowania.
-- `/ksiegowa` - wysyla prosty Excel dla ksiegowej za biezacy miesiac: data, start, koniec, liczba godzin.
-- `/ksiegowa YYYY-MM` - wysyla prosty Excel dla ksiegowej za wybrany miesiac, np. `/ksiegowa 2026-05`.
+- `/csv` - wysyla plik `.csv` z historia i podsumowaniem (rozdzielany średnikami, kompatybilny z polskim Excelem).
+- `/ksiegowa` - wysyla prosty plik `.csv` dla ksiegowej za biezacy miesiac: data, start, koniec, liczba godzin.
+- `/ksiegowa YYYY-MM` - wysyla prosty plik `.csv` dla ksiegowej za wybrany miesiac, np. `/ksiegowa 2026-05`.
 - `/popraw` - reczna edycja godzin.
 - `/pomoc` - pokazuje pomoc.
 
