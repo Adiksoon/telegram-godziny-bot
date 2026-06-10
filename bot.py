@@ -1082,11 +1082,12 @@ async def backup_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     if update.effective_message:
-        await update.effective_message.reply_document(
-            DB_PATH.open("rb"),
-            filename=DB_PATH.name,
-            caption="Kopia zapasowa bazy danych SQLite (work_hours.sqlite3)."
-        )
+        with open(DB_PATH, "rb") as f:
+            await update.effective_message.reply_document(
+                f,
+                filename=DB_PATH.name,
+                caption="Kopia zapasowa bazy danych SQLite (work_hours.sqlite3)."
+            )
 
 
 async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1098,11 +1099,12 @@ async def csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             path = Path(tmp) / f"godziny_{current.strftime('%Y%m%d_%H%M')}.csv"
             build_csv(conn, user_id, path)
             if update.effective_message:
-                await update.effective_message.reply_document(
-                    path.open("rb"),
-                    filename=path.name,
-                    caption="Eksport godzin do pliku CSV (rozdzielany średnikami, UTF-8)."
-                )
+                with open(path, "rb") as f:
+                    await update.effective_message.reply_document(
+                        f,
+                        filename=path.name,
+                        caption="Eksport godzin do pliku CSV (rozdzielany średnikami, UTF-8)."
+                    )
 
 
 async def accountant_csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1123,11 +1125,12 @@ async def accountant_csv_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 path = Path(tmp) / f"ewidencja_ksiegowa_{label}.csv"
                 build_accountant_csv(conn, user_id, path, first, next_month)
                 if update.effective_message:
-                    await update.effective_message.reply_document(
-                        path.open("rb"),
-                        filename=path.name,
-                        caption=f"Ewidencja godzin dla ksiegowej (CSV): {label}.",
-                    )
+                    with open(path, "rb") as f:
+                        await update.effective_message.reply_document(
+                            f,
+                            filename=path.name,
+                            caption=f"Ewidencja godzin dla ksiegowej (CSV): {label}.",
+                        )
         return
 
     # Jeśli brak argumentów, wyświetlamy menu wyboru okresu
@@ -1625,12 +1628,13 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
                     
                 await query.edit_message_text(f"Generuję ewidencję dla: {label}...")
                 if update.effective_chat:
-                    await context.bot.send_document(
-                        chat_id=update.effective_chat.id,
-                        document=path.open("rb"),
-                        filename=path.name,
-                        caption=caption_text
-                    )
+                    with open(path, "rb") as f:
+                        await context.bot.send_document(
+                            chat_id=update.effective_chat.id,
+                            document=f,
+                            filename=path.name,
+                            caption=caption_text
+                        )
 
 
 def main() -> None:
