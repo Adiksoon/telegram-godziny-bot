@@ -1638,81 +1638,88 @@ async def callback_query_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def main() -> None:
-    if not BOT_TOKEN or BOT_TOKEN == "wklej_tutaj_token_od_BotFather":
-        raise SystemExit("Brak TELEGRAM_BOT_TOKEN w pliku .env.")
-    init_db()
-    
-    # Start healthcheck server for Render
-    start_health_check_server()
+    import traceback
+    try:
+        logging.info(f"Bot token length: {len(BOT_TOKEN)}. First characters: {BOT_TOKEN[:10]}...")
+        if not BOT_TOKEN or BOT_TOKEN == "wklej_tutaj_token_od_BotFather":
+            raise SystemExit("Brak TELEGRAM_BOT_TOKEN w pliku .env.")
+        init_db()
+        
+        # Start healthcheck server for Render
+        start_health_check_server()
 
-    app = Application.builder().token(BOT_TOKEN).build()
-    fill_handler = ConversationHandler(
-        entry_points=[CommandHandler("uzupelnij", fill_start_cmd)],
-        states={
-            ASK_DETAILS: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj)$"), command_escape_handler),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, fill_details_message),
-            ],
-        },
-        fallbacks=[CommandHandler("anuluj", cancel_fill)],
-    )
-    app.add_handler(fill_handler)
+        app = Application.builder().token(BOT_TOKEN).build()
+        fill_handler = ConversationHandler(
+            entry_points=[CommandHandler("uzupelnij", fill_start_cmd)],
+            states={
+                ASK_DETAILS: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj)$"), command_escape_handler),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, fill_details_message),
+                ],
+            },
+            fallbacks=[CommandHandler("anuluj", cancel_fill)],
+        )
+        app.add_handler(fill_handler)
 
-    end_handler = ConversationHandler(
-        entry_points=[CommandHandler("koniec", end_cmd)],
-        states={
-            END_MAIN_TASK: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
-                CommandHandler("pomin", end_main_task_skipped),
-                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_main_task_skipped),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, end_main_task_received),
-            ],
-            END_ENERGY: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
-                CommandHandler("pomin", end_energy_skipped),
-                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_energy_skipped),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, end_energy_received),
-            ],
-            END_SENS: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
-                CommandHandler("pomin", end_sens_skipped),
-                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_sens_skipped),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, end_sens_received),
-            ],
-            END_FRUSTRATION: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
-                CommandHandler("pomin", end_frustration_skipped),
-                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_frustration_skipped),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, end_frustration_received),
-            ],
-            END_WORK_MODE: [
-                MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
-                CommandHandler("pomin", end_work_mode_skipped),
-                MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_work_mode_skipped),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, end_work_mode_received),
-            ],
-        },
-        fallbacks=[CommandHandler("anuluj", cancel_end_survey)],
-    )
-    app.add_handler(end_handler)
+        end_handler = ConversationHandler(
+            entry_points=[CommandHandler("koniec", end_cmd)],
+            states={
+                END_MAIN_TASK: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
+                    CommandHandler("pomin", end_main_task_skipped),
+                    MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_main_task_skipped),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, end_main_task_received),
+                ],
+                END_ENERGY: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
+                    CommandHandler("pomin", end_energy_skipped),
+                    MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_energy_skipped),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, end_energy_received),
+                ],
+                END_SENS: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
+                    CommandHandler("pomin", end_sens_skipped),
+                    MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_sens_skipped),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, end_sens_received),
+                ],
+                END_FRUSTRATION: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
+                    CommandHandler("pomin", end_frustration_skipped),
+                    MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_frustration_skipped),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, end_frustration_received),
+                ],
+                END_WORK_MODE: [
+                    MessageHandler(filters.COMMAND & ~filters.Regex("^/(anuluj|pomin)$"), command_escape_handler),
+                    CommandHandler("pomin", end_work_mode_skipped),
+                    MessageHandler(filters.Regex("^(Pomiń|pomiń)$"), end_work_mode_skipped),
+                    MessageHandler(filters.TEXT & ~filters.COMMAND, end_work_mode_received),
+                ],
+            },
+            fallbacks=[CommandHandler("anuluj", cancel_end_survey)],
+        )
+        app.add_handler(end_handler)
 
-    app.add_handler(CallbackQueryHandler(callback_query_handler))
-    app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("przerwa", break_cmd))
-    app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(CommandHandler("dodaj", quick_add_cmd))
-    app.add_handler(CommandHandler("lista", list_cmd))
-    app.add_handler(CommandHandler("usun", delete_cmd))
-    app.add_handler(CommandHandler("raport", report_cmd))
-    app.add_handler(CommandHandler("stawka", rate_cmd))
-    app.add_handler(CommandHandler("wyplata", payout_cmd))
-    app.add_handler(CommandHandler("csv", csv_cmd))
-    app.add_handler(CommandHandler("kopia", backup_cmd))
-    app.add_handler(CommandHandler("ksiegowa", accountant_csv_cmd))
-    app.add_handler(CommandHandler("popraw", edit_cmd))
-    app.add_handler(CommandHandler("pomoc", help_cmd))
-    app.add_error_handler(error_handler)
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+        app.add_handler(CallbackQueryHandler(callback_query_handler))
+        app.add_handler(CommandHandler("start", start_cmd))
+        app.add_handler(CommandHandler("przerwa", break_cmd))
+        app.add_handler(CommandHandler("status", status_cmd))
+        app.add_handler(CommandHandler("dodaj", quick_add_cmd))
+        app.add_handler(CommandHandler("lista", list_cmd))
+        app.add_handler(CommandHandler("usun", delete_cmd))
+        app.add_handler(CommandHandler("raport", report_cmd))
+        app.add_handler(CommandHandler("stawka", rate_cmd))
+        app.add_handler(CommandHandler("wyplata", payout_cmd))
+        app.add_handler(CommandHandler("csv", csv_cmd))
+        app.add_handler(CommandHandler("kopia", backup_cmd))
+        app.add_handler(CommandHandler("ksiegowa", accountant_csv_cmd))
+        app.add_handler(CommandHandler("popraw", edit_cmd))
+        app.add_handler(CommandHandler("pomoc", help_cmd))
+        app.add_error_handler(error_handler)
+        app.run_polling(allowed_updates=Update.ALL_TYPES)
+    except Exception as e:
+        logging.error("FATAL ERROR ON STARTUP:")
+        logging.error(traceback.format_exc())
+        raise e
 
 
 if __name__ == "__main__":
