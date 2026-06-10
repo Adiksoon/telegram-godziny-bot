@@ -25,7 +25,7 @@ DB_PATH = ROOT / "work_hours.sqlite3"
 
 load_dotenv(ROOT / ".env")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8258311318:AAEF_u-yX4DCYjvNfS5eQ0iZtMzSevmJDdM").strip()
 HOURLY_RATE = float(os.getenv("HOURLY_RATE", "31.5").replace(",", "."))
 try:
     TZ = ZoneInfo(os.getenv("TIMEZONE", "Europe/Warsaw"))
